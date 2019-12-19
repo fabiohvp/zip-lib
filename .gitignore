@@ -1,5 +1,6 @@
 /node_modules
-/lib
+/lib/*.map
+/lib/*.ts
 /test/out
 /test/zips
 /test/unzips
