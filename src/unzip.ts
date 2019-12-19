@@ -1,10 +1,12 @@
-import * as yauzl from "yauzl";
 import * as exfs from "./fs";
-import { WriteStream, createWriteStream } from "fs";
 import * as path from "path";
-import { Readable } from "stream";
 import * as util from "./util";
+import * as yauzl from "yauzl";
+
+import { WriteStream, createWriteStream } from "fs";
+
 import { Cancelable } from "./cancelable";
+import { Readable } from "stream";
 
 export interface IExtractOptions {
     /**
@@ -24,12 +26,13 @@ export interface IExtractOptions {
      * If you set `symlinkAsFileOnWindows` to `true` and the zip contains symlink,
      * be sure to run the code under the administrator, otherwise an `EPERM` error will be thrown.
      */
-    symlinkAsFileOnWindows?: boolean
+    symlinkAsFileOnWindows?: boolean;
     /**
      * Called before an item is extracted.
      * @param event
      */
     onEntry?: (event: IEntryEvent) => void;
+    onData?: (data: any) => void;
 }
 
 /**
@@ -54,9 +57,7 @@ class EntryEvent implements IEntryEvent {
     /**
      *
      */
-    constructor(private _entryCount: number) {
-
-    }
+    constructor(private _entryCount: number) {}
     private _entryName: string;
     get entryName(): string {
         return this._entryName;
@@ -118,7 +119,7 @@ export class Unzip extends Cancelable {
         zfile.readEntry();
         return new Promise<void>((c, e) => {
             const total: number = zfile.entryCount;
-            zfile.once("error", (err) => {
+            zfile.once("error", err => {
                 e(this.wrapError(err));
             });
             zfile.once("close", () => {
@@ -140,7 +141,9 @@ export class Unzip extends Cancelable {
             zfile.on("entry", async (entry: yauzl.Entry) => {
                 // use UTF-8 in all situations
                 // see https://github.com/thejoshwolfe/yauzl/issues/84
-                const rawName = (entry.fileName as any as Buffer).toString("utf8")
+                const rawName = ((entry.fileName as any) as Buffer).toString(
+                    "utf8"
+                );
                 // allow backslash
                 const fileName = rawName.replace(/\\/g, "/");
                 // Because `decodeStrings` is `false`, we need to manually verify the entryname
@@ -158,7 +161,12 @@ export class Unzip extends Cancelable {
                         entryEvent.reset();
                         zfile.readEntry();
                     } else {
-                        await this.handleEntry(zfile, entry, fileName, targetFolder);
+                        await this.handleEntry(
+                            zfile,
+                            entry,
+                            fileName,
+                            targetFolder
+                        );
                     }
                     extractedEntriesCount++;
                     if (extractedEntriesCount === total) {
@@ -193,21 +201,30 @@ export class Unzip extends Cancelable {
 
     private openZip(zipFile: string): Promise<yauzl.ZipFile> {
         return new Promise<yauzl.ZipFile>((c, e) => {
-            yauzl.open(zipFile, {
-                lazyEntries: true,
-                // see https://github.com/thejoshwolfe/yauzl/issues/84
-                decodeStrings: false
-            }, (err, zfile) => {
-                if (err) {
-                    e(this.wrapError(err));
-                } else {
-                    c(zfile!)
+            yauzl.open(
+                zipFile,
+                {
+                    lazyEntries: true,
+                    // see https://github.com/thejoshwolfe/yauzl/issues/84
+                    decodeStrings: false
+                },
+                (err, zfile) => {
+                    if (err) {
+                        e(this.wrapError(err));
+                    } else {
+                        c(zfile!);
+                    }
                 }
-            });
+            );
         });
     }
 
-    private async handleEntry(zfile: yauzl.ZipFile, entry: yauzl.Entry, decodeEntryFileName: string, targetPath: string): Promise<void> {
+    private async handleEntry(
+        zfile: yauzl.ZipFile,
+        entry: yauzl.Entry,
+        decodeEntryFileName: string,
+        targetPath: string
+    ): Promise<void> {
         if (/\/$/.test(decodeEntryFileName)) {
             // Directory file names end with '/'.
             // Note that entires for directories themselves are optional.
@@ -216,11 +233,19 @@ export class Unzip extends Cancelable {
             zfile.readEntry();
         } else {
             // file entry
-            await this.extractEntry(zfile, entry, decodeEntryFileName, targetPath);
+            await this.extractEntry(
+                zfile,
+                entry,
+                decodeEntryFileName,
+                targetPath
+            );
         }
     }
 
-    private openZipFileStream(zfile: yauzl.ZipFile, entry: yauzl.Entry): Promise<Readable> {
+    private openZipFileStream(
+        zfile: yauzl.ZipFile,
+        entry: yauzl.Entry
+    ): Promise<Readable> {
         return new Promise<Readable>((c, e) => {
             zfile.openReadStream(entry, (err, readStream) => {
                 if (err) {
@@ -232,19 +257,29 @@ export class Unzip extends Cancelable {
         });
     }
 
-    private async extractEntry(zfile: yauzl.ZipFile, entry: yauzl.Entry, decodeEntryFileName: string, targetPath: string): Promise<void> {
+    private async extractEntry(
+        zfile: yauzl.ZipFile,
+        entry: yauzl.Entry,
+        decodeEntryFileName: string,
+        targetPath: string
+    ): Promise<void> {
         const filePath = path.join(targetPath, decodeEntryFileName);
         await exfs.ensureFolder(path.dirname(filePath));
         const readStream = await this.openZipFileStream(zfile, entry);
+        readStream.on("data", this.onDataCallback);
         readStream.on("end", () => {
             zfile.readEntry();
         });
         await this.writeEntryToFile(readStream, entry, filePath);
     }
 
-    private async writeEntryToFile(readStream: Readable, entry: yauzl.Entry, filePath: string): Promise<void> {
+    private async writeEntryToFile(
+        readStream: Readable,
+        entry: yauzl.Entry,
+        filePath: string
+    ): Promise<void> {
         let fileStream: WriteStream;
-        this.cancelCallback = (err) => {
+        this.cancelCallback = err => {
             this.cancelCallback = undefined;
             if (fileStream) {
                 readStream.unpipe(fileStream);
@@ -255,8 +290,8 @@ export class Unzip extends Cancelable {
             try {
                 const mode = this.modeFromEntry(entry);
                 // see https://unix.stackexchange.com/questions/193465/what-file-mode-is-a-symlink
-                const isSymlink = ((mode & 0o170000) === 0o120000);
-                readStream.once("error", (err) => {
+                const isSymlink = (mode & 0o170000) === 0o120000;
+                readStream.once("error", err => {
                     e(this.wrapError(err));
                 });
 
@@ -271,11 +306,11 @@ export class Unzip extends Cancelable {
                     });
                     readStream.once("end", () => {
                         this.createSymlink(linkContent, filePath).then(c, e);
-                    })
+                    });
                 } else {
                     fileStream = createWriteStream(filePath, { mode });
                     fileStream.once("close", () => c());
-                    fileStream.once("error", (err) => {
+                    fileStream.once("error", err => {
                         e(this.wrapError(err));
                     });
                     readStream.pipe(fileStream);
@@ -294,13 +329,15 @@ export class Unzip extends Cancelable {
             .reduce((a, b) => a + b, attr & 61440 /* S_IFMT */);
     }
 
-    private async createSymlink(linkContent: string, des: string): Promise<void> {
+    private async createSymlink(
+        linkContent: string,
+        des: string
+    ): Promise<void> {
         await util.symlink(linkContent, des);
     }
 
     private isOverwrite(): boolean {
-        if (this.options &&
-            this.options.overwrite) {
+        if (this.options && this.options.overwrite) {
             return true;
         }
         return false;
@@ -312,11 +349,16 @@ export class Unzip extends Cancelable {
         }
     }
 
+    private onDataCallback(data: any): void {
+        if (this.options && this.options.onData) {
+            this.options.onData(data);
+        }
+    }
+
     private symlinkToFile(): boolean {
         let symlinkToFile: boolean = false;
         if (process.platform === "win32") {
-            if (this.options &&
-                this.options.symlinkAsFileOnWindows === false) {
+            if (this.options && this.options.symlinkAsFileOnWindows === false) {
                 symlinkToFile = false;
             } else {
                 symlinkToFile = true;

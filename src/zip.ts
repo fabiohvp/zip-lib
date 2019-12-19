@@ -1,13 +1,16 @@
-import * as yazl from "yazl";
-import { WriteStream, createWriteStream, createReadStream } from "fs";
 import * as exfs from "./fs";
 import * as path from "path";
 import * as util from "./util";
+import * as yazl from "yazl";
+
+import { WriteStream, createReadStream, createWriteStream } from "fs";
+
 import { Cancelable } from "./cancelable";
 
 interface ZipEntry {
     path: string;
     metadataPath?: string;
+    options?: yazl.Options;
 }
 
 export interface IZipOptions {
@@ -20,7 +23,8 @@ export interface IZipOptions {
      *
      * The default value is `false`.
      */
-    followSymlinks?: boolean
+    followSymlinks?: boolean;
+    onData?: (data: any) => void;
 }
 
 /**
@@ -48,15 +52,26 @@ export class Zip extends Cancelable {
      * @param metadataPath Typically metadataPath would be calculated as path.relative(root, realPath).
      * A valid metadataPath must not start with "/" or /[A-Za-z]:\//, and must not contain "..".
      */
-    public addFile(file: string, metadataPath?: string): void {
+    public addFile(
+        file: string,
+        metadataPath?: string,
+        options?: yazl.Options
+    ): void {
         let mpath = metadataPath;
         if (!mpath) {
             mpath = path.basename(file);
         }
         this.zipFiles.push({
             path: file,
-            metadataPath: mpath
+            metadataPath: mpath,
+            options
         });
+    }
+
+    private onDataCallback(data: any): void {
+        if (this.options && this.options.onData) {
+            this.options.onData(data);
+        }
     }
 
     /**
@@ -65,10 +80,15 @@ export class Zip extends Cancelable {
      * @param metadataPath Typically metadataPath would be calculated as path.relative(root, realPath).
      * A valid metadataPath must not start with "/" or /[A-Za-z]:\//, and must not contain "..".
      */
-    public addFolder(folder: string, metadataPath?: string): void {
+    public addFolder(
+        folder: string,
+        metadataPath?: string,
+        options?: yazl.Options
+    ): void {
         this.zipFolders.push({
             path: folder,
-            metadataPath: metadataPath
+            metadataPath: metadataPath,
+            options
         });
     }
 
@@ -95,7 +115,12 @@ export class Zip extends Cancelable {
                 const files = this.zipFiles;
                 for (let fi = 0; fi < files.length; fi++) {
                     const file = files[fi];
-                    await this.addFileOrSymlink(zip, file.path, file.metadataPath!);
+                    await this.addFileOrSymlink(
+                        zip,
+                        file.path,
+                        file.metadataPath!,
+                        file.options
+                    );
                 }
                 if (this.zipFolders.length > 0) {
                     await this.walkDir(this.zipFolders);
@@ -108,17 +133,18 @@ export class Zip extends Cancelable {
             zip.end();
             if (!this.isCanceled) {
                 this.zipStream = createWriteStream(zipFile);
-                this.zipStream.once("error", (err) => {
+                this.zipStream.once("data", this.onDataCallback);
+                this.zipStream.once("error", err => {
                     e(this.wrapError(err));
                 });
                 this.zipStream.once("close", () => {
                     if (this.isCanceled) {
-                        e(this.canceledError())
+                        e(this.canceledError());
                     } else {
-                        c(void 0)
+                        c(void 0);
                     }
                 });
-                zip.outputStream.once("error", (err) => {
+                zip.outputStream.once("error", err => {
                     e(this.wrapError(err));
                 });
                 zip.outputStream.pipe(this.zipStream);
@@ -143,9 +169,14 @@ export class Zip extends Cancelable {
         });
     }
 
-    private async addFileOrSymlink(zip: yazl.ZipFile, file: string, metadataPath: string): Promise<void> {
+    private async addFileOrSymlink(
+        zip: yazl.ZipFile,
+        file: string,
+        metadataPath: string,
+        options?: yazl.Options
+    ): Promise<void> {
         if (this.followSymlink()) {
-            zip.addFile(file, metadataPath);
+            zip.addFile(file, metadataPath, options);
         } else {
             const stat = await util.lstat(file);
             const entry: exfs.FileEntry = {
@@ -155,32 +186,40 @@ export class Zip extends Cancelable {
                 mode: stat.mode
             };
             if (stat.isSymbolicLink()) {
-                await this.addSymlink(zip, entry, metadataPath)
+                await this.addSymlink(zip, entry, metadataPath, options);
             } else {
-                this.addFileStream(zip, entry, metadataPath)
+                this.addFileStream(zip, entry, metadataPath, options);
             }
         }
     }
 
-    private addFileStream(zip: yazl.ZipFile, file: exfs.FileEntry, metadataPath: string): void {
+    private addFileStream(
+        zip: yazl.ZipFile,
+        file: exfs.FileEntry,
+        metadataPath: string,
+        options?: yazl.Options
+    ): void {
         const fileStream = createReadStream(file.path);
-        fileStream.once("error", (err) => {
+        fileStream.once("data", this.onDataCallback);
+        fileStream.once("error", err => {
             this.stopPipe(this.wrapError(err));
         });
         // If the file attribute is known, add the entry using `addReadStream`,
         // this can reduce the number of calls to the `fs.stat` method.
-        zip.addReadStream(fileStream, metadataPath, {
-            mode: file.mode,
-            mtime: file.mtime
-        });
+
+        const newOptions = { ...options, mode: file.mode, mtime: file.mtime };
+        zip.addReadStream(fileStream, metadataPath, newOptions);
     }
 
-    private async addSymlink(zip: yazl.ZipFile, file: exfs.FileEntry, metadataPath: string): Promise<void> {
+    private async addSymlink(
+        zip: yazl.ZipFile,
+        file: exfs.FileEntry,
+        metadataPath: string,
+        options?: yazl.Options
+    ): Promise<void> {
         const linkTarget = await util.readlink(file.path);
-        zip.addBuffer(Buffer.from(linkTarget), metadataPath, {
-            mtime: file.mtime,
-            mode: file.mode
-        })
+        const newOptions = { ...options, mode: file.mode, mtime: file.mtime };
+        zip.addBuffer(Buffer.from(linkTarget), metadataPath, newOptions);
     }
 
     private async walkDir(folders: ZipEntry[]): Promise<void> {
@@ -197,16 +236,31 @@ export class Zip extends Cancelable {
                         return;
                     }
                     const relativePath = path.relative(folder.path, entry.path);
-                    const metadataPath = folder.metadataPath ? path.join(folder.metadataPath, relativePath) : relativePath;
+                    const metadataPath = folder.metadataPath
+                        ? path.join(folder.metadataPath, relativePath)
+                        : relativePath;
                     if (entry.type === "dir") {
                         this.yazlFile.addEmptyDirectory(metadataPath, {
                             mtime: entry.mtime,
                             mode: entry.mode
                         });
-                    } else if (entry.type === "symlink" && !this.followSymlink()) {
-                        await this.addSymlink(this.yazlFile, entry, metadataPath);
+                    } else if (
+                        entry.type === "symlink" &&
+                        !this.followSymlink()
+                    ) {
+                        await this.addSymlink(
+                            this.yazlFile,
+                            entry,
+                            metadataPath,
+                            folder.options
+                        );
                     } else {
-                        this.addFileStream(this.yazlFile, entry, metadataPath);
+                        this.addFileStream(
+                            this.yazlFile,
+                            entry,
+                            metadataPath,
+                            folder.options
+                        );
                     }
                 }
             } else {
@@ -232,8 +286,7 @@ export class Zip extends Cancelable {
 
     private followSymlink(): boolean {
         let followSymlink: boolean = false;
-        if (this.options &&
-            this.options.followSymlinks === true) {
+        if (this.options && this.options.followSymlinks === true) {
             followSymlink = true;
         }
         return followSymlink;
